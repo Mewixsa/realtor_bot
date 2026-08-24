@@ -7,7 +7,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "ВАШ_ТОКЕН")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "5270819992"))
 
 bot = Bot(token=BOT_TOKEN)
@@ -34,19 +34,30 @@ def init_db():
 
 init_db()
 
+# --- МЕНЮ И КНОПКИ ---
+
+def get_main_keyboard():
+    # Главная клавиатура внизу экрана
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📥 Заявки"), KeyboardButton(text="🏢 Квартиры")]
+        ],
+        resize_keyboard=True
+    )
+
 # --- ОБРАБОТКА ТЕЛЕГРАМ БОТА ---
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
-    kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📥 Активные заявки")]],
-        resize_keyboard=True
+    await message.answer(
+        "👋 **Добро пожаловать в панель управления!**\n\nВыберите нужный раздел в меню ниже:",
+        reply_markup=get_main_keyboard(),
+        parse_mode="Markdown"
     )
-    await message.answer("Панель управления заявками:", reply_markup=kb)
 
-@dp.message(lambda msg: msg.text == "📥 Активные заявки" or msg.text == "/leads")
+@dp.message(lambda msg: msg.text == "📥 Заявки" or msg.text == "/leads")
 async def show_leads(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
@@ -75,6 +86,14 @@ async def show_leads(message: types.Message):
             [InlineKeyboardButton(text="✅ Выполнено (Удалить)", callback_data=f"done_{lead_id}")]
         ])
         await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+@dp.message(lambda msg: msg.text == "🏢 Квартиры")
+async def show_properties(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    # Раздел управления каталогом объектов
+    await message.answer("🏢 **Раздел управления квартирами:**\n\nЗдесь можно просматривать и добавлять объекты недвижимости.")
 
 @dp.callback_query(lambda c: c.data.startswith('done_'))
 async def process_done(callback: types.CallbackQuery):
@@ -128,12 +147,10 @@ async def handle_web_lead(request):
 async def main():
     app = web.Application()
 
-    # 1. Сначала добавляем обычные маршруты
     app.router.add_get('/', handle_get_check)
     app.router.add_get('/api/lead', handle_get_check)
     app.router.add_post('/api/lead', handle_web_lead)
 
-    # 2. Инициализируем CORS
     cors = aiohttp_cors.setup(app, defaults={
         "*": aiohttp_cors.ResourceOptions(
             allow_credentials=True,
@@ -143,7 +160,6 @@ async def main():
         )
     })
 
-    # 3. Применяем CORS ко всем зарегистрированным ресурсам (он сам добавит корректные OPTIONS)
     for resource in list(app.router.resources()):
         cors.add(resource)
 
