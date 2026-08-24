@@ -2,18 +2,17 @@ import asyncio
 import os
 import sqlite3
 from aiohttp import web
+import aiohttp_cors
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
-import aiohttp_cors
 
 BOT_TOKEN = "8979887985:AAH4ncXa3H7Du7ekrrRdPqS0UJFaszGO4rw"
-ADMIN_ID = 5270819992  # Ваш Telegram ID из @userinfobot
+ADMIN_ID = 5270819992
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Локальная база данных
 DB_PATH = "leads.db"
 
 def init_db():
@@ -45,7 +44,7 @@ async def start_cmd(message: types.Message):
         keyboard=[[KeyboardButton(text="📥 Активные заявки")]],
         resize_keyboard=True
     )
-    await message.answer("Панель управления заявками:", reply_markup=kb)
+    await message.answer("Панель управления заявками риелтора:", reply_markup=kb)
 
 @dp.message(lambda msg: msg.text == "📥 Активные заявки" or msg.text == "/leads")
 async def show_leads(message: types.Message):
@@ -92,6 +91,9 @@ async def process_done(callback: types.CallbackQuery):
 
 # --- ВЕБ-СЕРВЕР ДЛЯ ПРИЕМА ЗАЯВОК ---
 
+async def handle_get_check(request):
+    return web.Response(text="Server is running!")
+
 async def handle_web_lead(request):
     try:
         data = await request.json()
@@ -125,40 +127,19 @@ async def handle_web_lead(request):
 
 async def main():
     app = web.Application()
-    app.router.add_post('/api/lead', handle_web_lead)
     
-    port = int(os.environ.get("PORT", 10000))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    
-    await asyncio.gather(
-        site.start(),
-        dp.start_polling(bot)
-    )
-
-if __name__ == '__main__':
-    asyncio.run(main())
-
-
-async def main():
-    app = web.Application()
-    
-    # Маршруты
-    app.router.add_get('/', handle_get_check)
-    app.router.add_get('/api/lead', handle_get_check)
-    app.router.add_post('/api/lead', handle_web_lead)
-    
-    # Настройка CORS
     cors = aiohttp_cors.setup(app, defaults={
         "*": aiohttp_cors.ResourceOptions(
             allow_credentials=True,
             expose_headers="*",
             allow_headers="*",
+            allow_methods="*"
         )
     })
-    for route in list(app.router.routes()):
-        cors.add(route)
+
+    cors.add(app.router.add_get('/', handle_get_check))
+    cors.add(app.router.add_get('/api/lead', handle_get_check))
+    cors.add(app.router.add_post('/api/lead', handle_web_lead))
 
     port = int(os.environ.get("PORT", 10000))
     runner = web.AppRunner(app)
