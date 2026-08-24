@@ -141,11 +141,15 @@ if __name__ == '__main__':
     asyncio.run(main())
 
 
-    async def main():
+async def main():
     app = web.Application()
+    
+    # Маршруты
+    app.router.add_get('/', handle_get_check)
+    app.router.add_get('/api/lead', handle_get_check)
     app.router.add_post('/api/lead', handle_web_lead)
-
-    # Настройка CORS (разрешает запросы с любых сайтов)
+    
+    # Настройка CORS
     cors = aiohttp_cors.setup(app, defaults={
         "*": aiohttp_cors.ResourceOptions(
             allow_credentials=True,
@@ -160,8 +164,11 @@ if __name__ == '__main__':
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', port)
-
+    
     await asyncio.gather(
         site.start(),
         dp.start_polling(bot)
     )
+
+if __name__ == '__main__':
+    asyncio.run(main())
