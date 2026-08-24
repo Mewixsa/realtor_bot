@@ -94,9 +94,6 @@ async def process_done(callback: types.CallbackQuery):
 async def handle_get_check(request):
     return web.Response(text="Server is running!")
 
-async def handle_options(request):
-    return web.Response(status=200)
-
 async def handle_web_lead(request):
     try:
         data = await request.json()
@@ -130,8 +127,13 @@ async def handle_web_lead(request):
 
 async def main():
     app = web.Application()
-    
-    # Настройка CORS
+
+    # 1. Сначала добавляем обычные маршруты
+    app.router.add_get('/', handle_get_check)
+    app.router.add_get('/api/lead', handle_get_check)
+    app.router.add_post('/api/lead', handle_web_lead)
+
+    # 2. Инициализируем CORS
     cors = aiohttp_cors.setup(app, defaults={
         "*": aiohttp_cors.ResourceOptions(
             allow_credentials=True,
@@ -141,11 +143,9 @@ async def main():
         )
     })
 
-    # Явное добавление всех маршрутов в CORS
-    cors.add(app.router.add_get('/', handle_get_check))
-    cors.add(app.router.add_get('/api/lead', handle_get_check))
-    cors.add(app.router.add_post('/api/lead', handle_web_lead))
-    cors.add(app.router.add_options('/api/lead', handle_options))
+    # 3. Применяем CORS ко всем зарегистрированным ресурсам (он сам добавит корректные OPTIONS)
+    for resource in list(app.router.resources()):
+        cors.add(resource)
 
     port = int(os.environ.get("PORT", 10000))
     runner = web.AppRunner(app)
