@@ -6,8 +6,8 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
-BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"
-ADMIN_ID = 123456789  # Ваш Telegram ID из @userinfobot
+BOT_TOKEN = "8979887985:AAH4ncXa3H7Du7ekrrRdPqS0UJFaszGO4rw"
+ADMIN_ID = 5270819992  # Ваш Telegram ID из @userinfobot
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
