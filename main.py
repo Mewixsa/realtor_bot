@@ -44,7 +44,7 @@ async def start_cmd(message: types.Message):
         keyboard=[[KeyboardButton(text="📥 Активные заявки")]],
         resize_keyboard=True
     )
-    await message.answer("Панель управления заявками риелтора:", reply_markup=kb)
+    await message.answer("Панель управления заявками:", reply_markup=kb)
 
 @dp.message(lambda msg: msg.text == "📥 Активные заявки" or msg.text == "/leads")
 async def show_leads(message: types.Message):
@@ -89,10 +89,13 @@ async def process_done(callback: types.CallbackQuery):
     await callback.message.edit_text(f"<s>Заявка #{lead_id} выполнена</s>", parse_mode="HTML")
     await callback.answer("Заявка выполнена!")
 
-# --- ВЕБ-СЕРВЕР ДЛЯ ПРИЕМА ЗАЯВОК ---
+# --- ВЕБ-СЕРВЕР ---
 
 async def handle_get_check(request):
     return web.Response(text="Server is running!")
+
+async def handle_options(request):
+    return web.Response(status=200)
 
 async def handle_web_lead(request):
     try:
@@ -128,6 +131,7 @@ async def handle_web_lead(request):
 async def main():
     app = web.Application()
     
+    # Настройка CORS
     cors = aiohttp_cors.setup(app, defaults={
         "*": aiohttp_cors.ResourceOptions(
             allow_credentials=True,
@@ -137,9 +141,11 @@ async def main():
         )
     })
 
+    # Явное добавление всех маршрутов в CORS
     cors.add(app.router.add_get('/', handle_get_check))
     cors.add(app.router.add_get('/api/lead', handle_get_check))
     cors.add(app.router.add_post('/api/lead', handle_web_lead))
+    cors.add(app.router.add_options('/api/lead', handle_options))
 
     port = int(os.environ.get("PORT", 10000))
     runner = web.AppRunner(app)
