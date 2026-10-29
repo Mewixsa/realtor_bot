@@ -4,6 +4,13 @@ services:
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
+    # Persistent disk so the SQLite catalog survives deploys and restarts.
+    disk:
+      name: realtor-bot-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: PORT
         value: 10000
+      - key: DATA_DIR
+        value: /var/data

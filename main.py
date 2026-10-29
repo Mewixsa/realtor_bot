@@ -20,7 +20,31 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "5270819992"))
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-DB_PATH = "leads.db"
+# Render persistent disk is mounted at /var/data; local development keeps the DB beside this file.
+DATA_DIR = os.environ.get("DATA_DIR", "/var/data" if os.path.isdir("/var/data") else os.path.dirname(os.path.abspath(__file__)))
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "leads.db")
+LEGACY_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "leads.db")
+
+
+def migrate_legacy_database():
+    """Copy the existing working-directory SQLite database onto the persistent disk once."""
+    if os.path.exists(DB_PATH) or not os.path.isfile(LEGACY_DB_PATH):
+        return
+    if os.path.abspath(DB_PATH) == os.path.abspath(LEGACY_DB_PATH):
+        return
+
+    source = sqlite3.connect(LEGACY_DB_PATH)
+    destination = sqlite3.connect(DB_PATH)
+    try:
+        source.backup(destination)
+    finally:
+        destination.close()
+        source.close()
+
+
+migrate_legacy_database()
+
 
 class AddProperty(StatesGroup):
     title = State()
