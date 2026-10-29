@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sqlite3
+from urllib.parse import urlparse
 from aiohttp import web
 import aiohttp_cors
 from aiogram import Bot, Dispatcher, types, F
@@ -261,8 +262,15 @@ async def handle_get_properties(request):
     rows = cursor.fetchall()
     conn.close()
 
-    properties = [
-        {
+    properties = []
+    for row in rows:
+        photo_url = row[7] or ""
+        parsed_photo_url = urlparse(photo_url)
+        if parsed_photo_url.hostname == "api.telegram.org" and parsed_photo_url.path.startswith("/file/bot"):
+            # Keep the Telegram bot token on the server; serve Telegram photos through our proxy route.
+            photo_url = f"/api/property-photo/{row[0]}"
+
+        properties.append({
             "id": row[0],
             "title": row[1],
             "price": row[2],
@@ -270,11 +278,49 @@ async def handle_get_properties(request):
             "area": row[4],
             "floor": row[5],
             "deadline": row[6],
-            "photo_url": row[7]
-        }
-        for row in rows
-    ]
+            "photo_url": photo_url,
+        })
+
     return web.json_response(properties)
+
+
+async def handle_property_photo(request):
+    property_id = request.match_info["property_id"]
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT photo_url FROM properties WHERE id = ?", (property_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row or not row[0]:
+        raise web.HTTPNotFound()
+
+    photo_url = row[0]
+    parsed_photo_url = urlparse(photo_url)
+    expected_prefix = f"/file/bot{BOT_TOKEN}/"
+    if (
+        parsed_photo_url.scheme != "https"
+        or parsed_photo_url.hostname != "api.telegram.org"
+        or not parsed_photo_url.path.startswith(expected_prefix)
+    ):
+        raise web.HTTPNotFound()
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=25)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(photo_url, allow_redirects=False) as response:
+                if response.status != 200 or not response.headers.get("Content-Type", "").startswith("image/"):
+                    raise web.HTTPBadGateway(text="Could not retrieve property photo")
+                body = await response.content.read(12 * 1024 * 1024 + 1)
+                if len(body) > 12 * 1024 * 1024:
+                    raise web.HTTPBadGateway(text="Property photo is too large")
+                return web.Response(
+                    body=body,
+                    content_type=response.headers["Content-Type"].split(";", 1)[0],
+                    headers={"Cache-Control": "public, max-age=3600"},
+                )
+    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+        raise web.HTTPBadGateway(text="Could not retrieve property photo") from error
 
 async def main():
     app = web.Application()
@@ -283,6 +329,7 @@ async def main():
     app.router.add_get('/api/lead', handle_get_check)
     app.router.add_post('/api/lead', handle_web_lead)
     app.router.add_get('/api/properties', handle_get_properties)
+    app.router.add_get('/api/property-photo/{property_id}', handle_property_photo)
 
     cors = aiohttp_cors.setup(app, defaults={
         "*": aiohttp_cors.ResourceOptions(
