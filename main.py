@@ -487,7 +487,7 @@ async def handle_case_photo(request):
     try:
         timeout = aiohttp.ClientTimeout(total=25)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(photo_url, allow_redirects=False) as response:
+            async with session.get(photo_url, allow_redirects=True) as response:
                 if response.status != 200 or not response.headers.get("Content-Type", "").startswith("image/"):
                     raise web.HTTPBadGateway(text="Could not retrieve case photo")
                 body = await response.content.read(12 * 1024 * 1024 + 1)
@@ -526,7 +526,7 @@ async def handle_property_photo(request):
     try:
         timeout = aiohttp.ClientTimeout(total=25)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(photo_url, allow_redirects=False) as response:
+            async with session.get(photo_url, allow_redirects=True) as response:
                 if response.status != 200 or not response.headers.get("Content-Type", "").startswith("image/"):
                     raise web.HTTPBadGateway(text="Could not retrieve property photo")
                 body = await response.content.read(12 * 1024 * 1024 + 1)
