@@ -1,7 +1,9 @@
 import asyncio
+import html
 import os
 import sqlite3
 from urllib.parse import urlparse
+import aiohttp
 from aiohttp import web
 import aiohttp_cors
 from aiogram import Bot, Dispatcher, types, F
@@ -28,6 +30,15 @@ class AddProperty(StatesGroup):
     deadline = State()
     photo = State()
 
+
+class AddCase(StatesGroup):
+    title = State()
+    location = State()
+    goal = State()
+    photo = State()
+    story = State()
+    result = State()
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -50,6 +61,19 @@ def init_db():
             photo_url TEXT
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS cases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            location TEXT NOT NULL,
+            goal TEXT NOT NULL,
+            photo_url TEXT,
+            story TEXT NOT NULL,
+            result TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -58,7 +82,8 @@ init_db()
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📥 Заявки"), KeyboardButton(text="🏢 Квартиры")]
+            [KeyboardButton(text="📥 Заявки"), KeyboardButton(text="🏢 Квартиры")],
+            [KeyboardButton(text="📚 Кейсы")]
         ],
         resize_keyboard=True
     )
@@ -111,6 +136,139 @@ async def process_done(callback: types.CallbackQuery):
     conn.close()
     await callback.message.edit_text(f"<s>Заявка #{lead_id} выполнена</s>", parse_mode="HTML")
     await callback.answer("Заявка выполнена!")
+
+@dp.message(F.text == "📚 Кейсы")
+async def show_cases_menu(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить кейс", callback_data="add_case")],
+        [InlineKeyboardButton(text="📋 Список кейсов", callback_data="list_cases")],
+    ])
+    await message.answer("📚 <b>Кейсы клиентов (без имён)</b>", parse_mode="HTML", reply_markup=keyboard)
+
+
+@dp.callback_query(F.data == "add_case")
+async def start_add_case(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(AddCase.title)
+    await callback.message.answer("1️⃣ Заголовок кейса (например: «Квартира для молодой семьи»):")
+    await callback.answer()
+
+
+@dp.message(AddCase.title)
+async def case_title(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await state.update_data(title=(message.text or "").strip())
+    await state.set_state(AddCase.location)
+    await message.answer("2️⃣ Город или жилой комплекс:")
+
+
+@dp.message(AddCase.location)
+async def case_location(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await state.update_data(location=(message.text or "").strip())
+    await state.set_state(AddCase.goal)
+    await message.answer("3️⃣ Запрос клиента и какая квартира нужна (без имени и личных данных):")
+
+
+@dp.message(AddCase.goal)
+async def case_goal(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await state.update_data(goal=(message.text or "").strip())
+    await state.set_state(AddCase.photo)
+    await message.answer("4️⃣ Отправьте фотографию квартиры/объекта или пришлите ссылку. Напишите «пропустить», если без фото.")
+
+
+@dp.message(AddCase.photo)
+async def case_photo(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    photo_url = ""
+    if message.photo:
+        photo = message.photo[-1]
+        file_info = await bot.get_file(photo.file_id)
+        photo_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+    elif message.text and message.text.strip().lower() != "пропустить":
+        photo_url = message.text.strip()
+    await state.update_data(photo_url=photo_url)
+    await state.set_state(AddCase.story)
+    await message.answer("5️⃣ Краткая история подбора и сделки. Не указывайте имя или контакты клиента:")
+
+
+@dp.message(AddCase.story)
+async def case_story(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await state.update_data(story=(message.text or "").strip())
+    await state.set_state(AddCase.result)
+    await message.answer("6️⃣ Результат: что подобрали и чем завершилась история?")
+
+
+@dp.message(AddCase.result)
+async def case_result(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    result = (message.text or "").strip()
+    data = await state.get_data()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO cases (title, location, goal, photo_url, story, result, status) VALUES (?, ?, ?, ?, ?, ?, 'published')",
+        (data["title"], data["location"], data["goal"], data.get("photo_url", ""), data["story"], result),
+    )
+    case_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    await state.clear()
+    await message.answer(f"✅ Кейс #{case_id} опубликован на сайте. Данные клиентов не публикуются.")
+
+
+@dp.callback_query(F.data == "list_cases")
+async def list_cases(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, title, location, status FROM cases ORDER BY id DESC")
+    cases = cursor.fetchall()
+    conn.close()
+    if not cases:
+        await callback.message.answer("📭 Кейсов пока нет.")
+    for case_id, title, location, status in cases:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_case_{case_id}")
+        ]])
+        state_label = "На сайте" if status == "published" else "Черновик"
+        await callback.message.answer(
+            f"<b>Кейс #{case_id}: {html.escape(title)}</b>\n{html.escape(location)} · {state_label}",
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("del_case_"))
+async def delete_case(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    case_id = callback.data.rsplit("_", 1)[-1]
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM cases WHERE id = ?", (case_id,))
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    await callback.message.edit_text("🗑 Кейс удалён." if deleted else "Кейс не найден.")
+    await callback.answer()
+
 
 @dp.message(F.text == "🏢 Квартиры")
 async def show_properties_menu(message: types.Message):
@@ -284,6 +442,66 @@ async def handle_get_properties(request):
     return web.json_response(properties)
 
 
+async def handle_get_cases(request):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, title, location, goal, photo_url, story, result FROM cases WHERE status = 'published' ORDER BY id DESC"
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    cases = []
+    for row in rows:
+        photo_url = row[4] or ""
+        parsed_photo_url = urlparse(photo_url)
+        if parsed_photo_url.hostname == "api.telegram.org" and parsed_photo_url.path.startswith("/file/bot"):
+            photo_url = f"/api/case-photo/{row[0]}"
+        cases.append({
+            "id": row[0],
+            "title": row[1],
+            "location": row[2],
+            "goal": row[3],
+            "photo_url": photo_url,
+            "story": row[5],
+            "result": row[6],
+        })
+    return web.json_response(cases)
+
+
+async def handle_case_photo(request):
+    case_id = request.match_info["case_id"]
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT photo_url FROM cases WHERE id = ? AND status = 'published'", (case_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row or not row[0]:
+        raise web.HTTPNotFound()
+    photo_url = row[0]
+    parsed_photo_url = urlparse(photo_url)
+    expected_prefix = f"/file/bot{BOT_TOKEN}/"
+    if (parsed_photo_url.scheme != "https" or parsed_photo_url.hostname != "api.telegram.org"
+            or not parsed_photo_url.path.startswith(expected_prefix)):
+        raise web.HTTPNotFound()
+    try:
+        timeout = aiohttp.ClientTimeout(total=25)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(photo_url, allow_redirects=False) as response:
+                if response.status != 200 or not response.headers.get("Content-Type", "").startswith("image/"):
+                    raise web.HTTPBadGateway(text="Could not retrieve case photo")
+                body = await response.content.read(12 * 1024 * 1024 + 1)
+                if len(body) > 12 * 1024 * 1024:
+                    raise web.HTTPBadGateway(text="Case photo is too large")
+                return web.Response(
+                    body=body,
+                    content_type=response.headers["Content-Type"].split(";", 1)[0],
+                    headers={"Cache-Control": "public, max-age=3600"},
+                )
+    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+        raise web.HTTPBadGateway(text="Could not retrieve case photo") from error
+
+
 async def handle_property_photo(request):
     property_id = request.match_info["property_id"]
     conn = sqlite3.connect(DB_PATH)
@@ -330,6 +548,8 @@ async def main():
     app.router.add_post('/api/lead', handle_web_lead)
     app.router.add_get('/api/properties', handle_get_properties)
     app.router.add_get('/api/property-photo/{property_id}', handle_property_photo)
+    app.router.add_get('/api/cases', handle_get_cases)
+    app.router.add_get('/api/case-photo/{case_id}', handle_case_photo)
 
     cors = aiohttp_cors.setup(app, defaults={
         "*": aiohttp_cors.ResourceOptions(
