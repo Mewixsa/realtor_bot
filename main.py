@@ -39,6 +39,10 @@ class AddCase(StatesGroup):
     story = State()
     result = State()
 
+
+class ReplacePhoto(StatesGroup):
+    photo = State()
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -247,15 +251,28 @@ async def list_cases(callback: types.CallbackQuery):
     if not cases:
         await callback.message.answer("📭 Кейсов пока нет.")
     for case_id, title, location, status in cases:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_case_{case_id}")
-        ]])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🖼 Обновить фото", callback_data=f"replace_case_photo_{case_id}")],
+            [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_case_{case_id}")],
+        ])
         state_label = "На сайте" if status == "published" else "Черновик"
         await callback.message.answer(
             f"<b>Кейс #{case_id}: {html.escape(title)}</b>\n{html.escape(location)} · {state_label}",
             parse_mode="HTML",
             reply_markup=keyboard,
         )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("replace_case_photo_"))
+async def start_replace_case_photo(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    case_id = callback.data.rsplit("_", 1)[-1]
+    await state.update_data(photo_kind="case", photo_target_id=case_id)
+    await state.set_state(ReplacePhoto.photo)
+    await callback.message.answer(f"Отправьте новое фото для кейса #{case_id} или пришлите ссылку на изображение.")
     await callback.answer()
 
 
@@ -300,10 +317,23 @@ async def list_properties(callback: types.CallbackQuery):
 
     for prop_id, title, price in props:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Удалить", callback_data=f"del_prop_{prop_id}")]
+            [InlineKeyboardButton(text="🖼 Обновить фото", callback_data=f"replace_property_photo_{prop_id}")],
+            [InlineKeyboardButton(text="❌ Удалить", callback_data=f"del_prop_{prop_id}")],
         ])
         await callback.message.answer(f"🏠 **{title}**\n💰 {price}", parse_mode="Markdown", reply_markup=kb)
     await callback.answer()
+
+@dp.callback_query(F.data.startswith("replace_property_photo_"))
+async def start_replace_property_photo(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    property_id = callback.data.rsplit("_", 1)[-1]
+    await state.update_data(photo_kind="property", photo_target_id=property_id)
+    await state.set_state(ReplacePhoto.photo)
+    await callback.message.answer(f"Отправьте новое фото для квартиры #{property_id} или пришлите ссылку на изображение.")
+    await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("del_prop_"))
 async def delete_property(callback: types.CallbackQuery):
@@ -359,6 +389,38 @@ async def process_deadline(message: types.Message, state: FSMContext):
     await state.update_data(deadline=message.text)
     await state.set_state(AddProperty.photo)
     await message.answer("7️⃣ Отправьте **фотографию** объекта (или ссылку):", parse_mode="Markdown")
+
+@dp.message(ReplacePhoto.photo)
+async def save_replacement_photo(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    file_id = message.photo[-1].file_id if message.photo else ""
+    photo_url = message.text.strip() if message.text else ""
+    if not file_id and not photo_url:
+        await message.answer("Пришлите фотографию или ссылку на изображение.")
+        return
+
+    data = await state.get_data()
+    table = "cases" if data.get("photo_kind") == "case" else "properties"
+    if table == "cases":
+        cursor_sql = "UPDATE cases SET photo_file_id = ?, photo_url = ? WHERE id = ?"
+    else:
+        cursor_sql = "UPDATE properties SET photo_file_id = ?, photo_url = ? WHERE id = ?"
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(cursor_sql, (file_id, photo_url, data.get("photo_target_id")))
+    updated = cursor.rowcount
+    conn.commit()
+    conn.close()
+    await state.clear()
+
+    if updated:
+        await message.answer("✅ Фото обновлено. Обновите страницу сайта, чтобы увидеть его.")
+    else:
+        await message.answer("Не удалось найти запись. Откройте список и попробуйте снова.")
+
 
 @dp.message(AddProperty.photo)
 async def process_photo(message: types.Message, state: FSMContext):
