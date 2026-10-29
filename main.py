@@ -58,7 +58,8 @@ def init_db():
             area TEXT,
             floor TEXT,
             deadline TEXT,
-            photo_url TEXT
+            photo_url TEXT,
+            photo_file_id TEXT
         )
     ''')
     cursor.execute('''
@@ -68,12 +69,17 @@ def init_db():
             location TEXT NOT NULL,
             goal TEXT NOT NULL,
             photo_url TEXT,
+            photo_file_id TEXT,
             story TEXT NOT NULL,
             result TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'draft',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    for table in ('properties', 'cases'):
+        columns = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
+        if 'photo_file_id' not in columns:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN photo_file_id TEXT")
     conn.commit()
     conn.close()
 
@@ -190,13 +196,12 @@ async def case_photo(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
     photo_url = ""
+    photo_file_id = ""
     if message.photo:
-        photo = message.photo[-1]
-        file_info = await bot.get_file(photo.file_id)
-        photo_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+        photo_file_id = message.photo[-1].file_id
     elif message.text and message.text.strip().lower() != "пропустить":
         photo_url = message.text.strip()
-    await state.update_data(photo_url=photo_url)
+    await state.update_data(photo_url=photo_url, photo_file_id=photo_file_id)
     await state.set_state(AddCase.story)
     await message.answer("5️⃣ Краткая история подбора и сделки. Не указывайте имя или контакты клиента:")
 
@@ -219,8 +224,8 @@ async def case_result(message: types.Message, state: FSMContext):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO cases (title, location, goal, photo_url, story, result, status) VALUES (?, ?, ?, ?, ?, ?, 'published')",
-        (data["title"], data["location"], data["goal"], data.get("photo_url", ""), data["story"], result),
+        "INSERT INTO cases (title, location, goal, photo_url, photo_file_id, story, result, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'published')",
+        (data["title"], data["location"], data["goal"], data.get("photo_url", ""), data.get("photo_file_id", ""), data["story"], result),
     )
     case_id = cursor.lastrowid
     conn.commit()
@@ -358,20 +363,19 @@ async def process_deadline(message: types.Message, state: FSMContext):
 @dp.message(AddProperty.photo)
 async def process_photo(message: types.Message, state: FSMContext):
     photo_url = ""
+    photo_file_id = ""
     if message.photo:
-        photo = message.photo[-1]
-        file_info = await bot.get_file(photo.file_id)
-        photo_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+        photo_file_id = message.photo[-1].file_id
     elif message.text:
-        photo_url = message.text
+        photo_url = message.text.strip()
 
     data = await state.get_data()
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO properties (title, price, address, area, floor, deadline, photo_url) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (data['title'], data['price'], data['address'], data['area'], data['floor'], data['deadline'], photo_url)
+        "INSERT INTO properties (title, price, address, area, floor, deadline, photo_url, photo_file_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (data['title'], data['price'], data['address'], data['area'], data['floor'], data['deadline'], photo_url, photo_file_id)
     )
     conn.commit()
     conn.close()
@@ -416,16 +420,17 @@ async def handle_web_lead(request):
 async def handle_get_properties(request):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, title, price, address, area, floor, deadline, photo_url FROM properties")
+    cursor.execute("SELECT id, title, price, address, area, floor, deadline, photo_url, photo_file_id FROM properties")
     rows = cursor.fetchall()
     conn.close()
 
     properties = []
     for row in rows:
         photo_url = row[7] or ""
+        photo_file_id = row[8] or ""
         parsed_photo_url = urlparse(photo_url)
-        if parsed_photo_url.hostname == "api.telegram.org" and parsed_photo_url.path.startswith("/file/bot"):
-            # Keep the Telegram bot token on the server; serve Telegram photos through our proxy route.
+        if photo_file_id or (parsed_photo_url.hostname == "api.telegram.org" and parsed_photo_url.path.startswith("/file/bot")):
+            # Ask Telegram for a fresh download URL; file URLs are temporary.
             photo_url = f"/api/property-photo/{row[0]}"
 
         properties.append({
@@ -446,7 +451,7 @@ async def handle_get_cases(request):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, title, location, goal, photo_url, story, result FROM cases WHERE status = 'published' ORDER BY id DESC"
+        "SELECT id, title, location, goal, photo_url, story, result, photo_file_id FROM cases WHERE status = 'published' ORDER BY id DESC"
     )
     rows = cursor.fetchall()
     conn.close()
@@ -454,8 +459,9 @@ async def handle_get_cases(request):
     cases = []
     for row in rows:
         photo_url = row[4] or ""
+        photo_file_id = row[7] or ""
         parsed_photo_url = urlparse(photo_url)
-        if parsed_photo_url.hostname == "api.telegram.org" and parsed_photo_url.path.startswith("/file/bot"):
+        if photo_file_id or (parsed_photo_url.hostname == "api.telegram.org" and parsed_photo_url.path.startswith("/file/bot")):
             photo_url = f"/api/case-photo/{row[0]}"
         cases.append({
             "id": row[0],
@@ -469,20 +475,31 @@ async def handle_get_cases(request):
     return web.json_response(cases)
 
 
+async def get_photo_download_url(file_id):
+    """Resolve a stable Telegram file_id into a fresh temporary download URL."""
+    telegram_file = await bot.get_file(file_id)
+    if not telegram_file.file_path:
+        raise web.HTTPBadGateway(text="Telegram did not return a photo path")
+    return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{telegram_file.file_path}"
+
+
 async def handle_case_photo(request):
     case_id = request.match_info["case_id"]
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT photo_url FROM cases WHERE id = ? AND status = 'published'", (case_id,))
+    cursor.execute("SELECT photo_url, photo_file_id FROM cases WHERE id = ? AND status = 'published'", (case_id,))
     row = cursor.fetchone()
     conn.close()
-    if not row or not row[0]:
+    if not row or not (row[0] or row[1]):
         raise web.HTTPNotFound()
-    photo_url = row[0]
+    photo_url, file_id = row
+    if file_id:
+        photo_url = await get_photo_download_url(file_id)
     parsed_photo_url = urlparse(photo_url)
     expected_prefix = f"/file/bot{BOT_TOKEN}/"
-    if (parsed_photo_url.scheme != "https" or parsed_photo_url.hostname != "api.telegram.org"
-            or not parsed_photo_url.path.startswith(expected_prefix)):
+    is_telegram_file = (parsed_photo_url.scheme == "https" and parsed_photo_url.hostname == "api.telegram.org"
+                        and parsed_photo_url.path.startswith(expected_prefix))
+    if not file_id and not is_telegram_file:
         raise web.HTTPNotFound()
     try:
         timeout = aiohttp.ClientTimeout(total=25)
@@ -506,21 +523,24 @@ async def handle_property_photo(request):
     property_id = request.match_info["property_id"]
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT photo_url FROM properties WHERE id = ?", (property_id,))
+    cursor.execute("SELECT photo_url, photo_file_id FROM properties WHERE id = ?", (property_id,))
     row = cursor.fetchone()
     conn.close()
 
-    if not row or not row[0]:
+    if not row or not (row[0] or row[1]):
         raise web.HTTPNotFound()
 
-    photo_url = row[0]
+    photo_url, file_id = row
+    if file_id:
+        photo_url = await get_photo_download_url(file_id)
     parsed_photo_url = urlparse(photo_url)
     expected_prefix = f"/file/bot{BOT_TOKEN}/"
-    if (
-        parsed_photo_url.scheme != "https"
-        or parsed_photo_url.hostname != "api.telegram.org"
-        or not parsed_photo_url.path.startswith(expected_prefix)
-    ):
+    is_telegram_file = (
+        parsed_photo_url.scheme == "https"
+        and parsed_photo_url.hostname == "api.telegram.org"
+        and parsed_photo_url.path.startswith(expected_prefix)
+    )
+    if not file_id and not is_telegram_file:
         raise web.HTTPNotFound()
 
     try:
