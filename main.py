@@ -1,9 +1,10 @@
 import asyncio
 import html
+import io
+import mimetypes
 import os
 import sqlite3
 from urllib.parse import urlparse
-import aiohttp
 from aiohttp import web
 import aiohttp_cors
 from aiogram import Bot, Dispatcher, types, F
@@ -537,12 +538,50 @@ async def handle_get_cases(request):
     return web.json_response(cases)
 
 
-async def get_photo_download_url(file_id):
-    """Resolve a stable Telegram file_id into a fresh temporary download URL."""
-    telegram_file = await bot.get_file(file_id)
-    if not telegram_file.file_path:
-        raise web.HTTPBadGateway(text="Telegram did not return a photo path")
-    return f"https://api.telegram.org/file/bot{BOT_TOKEN}/{telegram_file.file_path}"
+async def load_telegram_photo(file_id="", legacy_url=""):
+    """Load a Telegram photo using the bot's configured Telegram session."""
+    try:
+        if file_id:
+            telegram_file = await bot.get_file(file_id)
+            file_path = telegram_file.file_path
+            if not file_path:
+                raise web.HTTPBadGateway(text="Telegram did not return a photo path")
+        else:
+            parsed_url = urlparse(legacy_url)
+            expected_prefix = f"/file/bot{BOT_TOKEN}/"
+            if (parsed_url.scheme != "https" or parsed_url.hostname != "api.telegram.org"
+                    or not parsed_url.path.startswith(expected_prefix)):
+                raise web.HTTPNotFound()
+            file_path = parsed_url.path[len(expected_prefix):]
+
+        image_buffer = io.BytesIO()
+        await bot.download_file(file_path, destination=image_buffer)
+        image_data = image_buffer.getvalue()
+        if not image_data:
+            raise web.HTTPBadGateway(text="Telegram returned an empty photo")
+
+        content_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+        if content_type == "application/octet-stream":
+            if image_data.startswith(b"\\xff\\xd8\\xff"):
+                content_type = "image/jpeg"
+            elif image_data.startswith(b"\\x89PNG\\r\\n\\x1a\\n"):
+                content_type = "image/png"
+            elif image_data.startswith((b"GIF87a", b"GIF89a")):
+                content_type = "image/gif"
+            elif image_data.startswith(b"RIFF") and image_data[8:12] == b"WEBP":
+                content_type = "image/webp"
+
+        if not content_type.startswith("image/"):
+            raise web.HTTPBadGateway(text="Telegram file is not an image")
+        return web.Response(
+            body=image_data,
+            content_type=content_type,
+            headers={"Cache-Control": "public, max-age=3600", "X-Content-Type-Options": "nosniff"},
+        )
+    except web.HTTPException:
+        raise
+    except Exception as error:
+        raise web.HTTPBadGateway(text="Could not download photo from Telegram") from error
 
 
 async def handle_case_photo(request):
@@ -555,30 +594,7 @@ async def handle_case_photo(request):
     if not row or not (row[0] or row[1]):
         raise web.HTTPNotFound()
     photo_url, file_id = row
-    if file_id:
-        photo_url = await get_photo_download_url(file_id)
-    parsed_photo_url = urlparse(photo_url)
-    expected_prefix = f"/file/bot{BOT_TOKEN}/"
-    is_telegram_file = (parsed_photo_url.scheme == "https" and parsed_photo_url.hostname == "api.telegram.org"
-                        and parsed_photo_url.path.startswith(expected_prefix))
-    if not file_id and not is_telegram_file:
-        raise web.HTTPNotFound()
-    try:
-        timeout = aiohttp.ClientTimeout(total=25)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(photo_url, allow_redirects=True) as response:
-                if response.status != 200 or not response.headers.get("Content-Type", "").startswith("image/"):
-                    raise web.HTTPBadGateway(text="Could not retrieve case photo")
-                body = await response.content.read(12 * 1024 * 1024 + 1)
-                if len(body) > 12 * 1024 * 1024:
-                    raise web.HTTPBadGateway(text="Case photo is too large")
-                return web.Response(
-                    body=body,
-                    content_type=response.headers["Content-Type"].split(";", 1)[0],
-                    headers={"Cache-Control": "public, max-age=3600"},
-                )
-    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
-        raise web.HTTPBadGateway(text="Could not retrieve case photo") from error
+    return await load_telegram_photo(file_id=file_id, legacy_url=photo_url)
 
 
 async def handle_property_photo(request):
@@ -593,34 +609,7 @@ async def handle_property_photo(request):
         raise web.HTTPNotFound()
 
     photo_url, file_id = row
-    if file_id:
-        photo_url = await get_photo_download_url(file_id)
-    parsed_photo_url = urlparse(photo_url)
-    expected_prefix = f"/file/bot{BOT_TOKEN}/"
-    is_telegram_file = (
-        parsed_photo_url.scheme == "https"
-        and parsed_photo_url.hostname == "api.telegram.org"
-        and parsed_photo_url.path.startswith(expected_prefix)
-    )
-    if not file_id and not is_telegram_file:
-        raise web.HTTPNotFound()
-
-    try:
-        timeout = aiohttp.ClientTimeout(total=25)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(photo_url, allow_redirects=True) as response:
-                if response.status != 200 or not response.headers.get("Content-Type", "").startswith("image/"):
-                    raise web.HTTPBadGateway(text="Could not retrieve property photo")
-                body = await response.content.read(12 * 1024 * 1024 + 1)
-                if len(body) > 12 * 1024 * 1024:
-                    raise web.HTTPBadGateway(text="Property photo is too large")
-                return web.Response(
-                    body=body,
-                    content_type=response.headers["Content-Type"].split(";", 1)[0],
-                    headers={"Cache-Control": "public, max-age=3600"},
-                )
-    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
-        raise web.HTTPBadGateway(text="Could not retrieve property photo") from error
+    return await load_telegram_photo(file_id=file_id, legacy_url=photo_url)
 
 async def main():
     app = web.Application()
